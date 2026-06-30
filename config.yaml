@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# arXiv daily-alert configuration
+#
+# HOW MATCHING WORKS
+#   A paper "matches a topic" if ANY of its `rules` fire.
+#   A rule fires when ALL of its `all_of` groups are present in the title+abstract.
+#   Within a group, ANY single term is enough (it's an OR list).
+#   So: rules = OR,  groups inside a rule = AND,  terms inside a group = OR.
+#   All matching is case-insensitive and substring-based, so "decod" catches
+#   "decoder" and "decoding", "metrolog" catches "metrology"/"metrological", etc.
+#
+# To add/remove keywords just edit the lists below — no code changes needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+category: quant-ph     # arXiv category to scan (the code from /list/quant-ph/new)
+lookback_days: 2       # how many days back to consider (dedup makes this safe)
+max_email: 80          # safety cap on papers per email
+
+topics:
+
+  # ── 1. Quantum error correction: prior-assisted / Bayesian / approximate ────
+  - name: "QEC — prior-assisted / Bayesian decoding / approximate"
+    rules:
+      - all_of:
+          - ["quantum error correction", "error-correcting code", "error correcting code",
+             "qec", "stabilizer code", "quantum code", "quantum codes"]
+          - ["prior-assisted", "prior assisted", "prior assisting", "prior information",
+             "prior-information", "side information", "assisted decoding"]
+      - all_of:
+          - ["decod"]                          # decoder / decoding
+          - ["bayesian"]
+      - all_of:
+          - ["approximate"]
+          - ["quantum error correction", "error-correcting code",
+             "error correcting code", "aqec"]
+
+  # ── 2. Energy–time–complexity tradeoffs in metrology / sensing / algorithms ─
+  - name: "Energy–time–complexity tradeoffs in metrology / sensing / algorithms"
+    rules:
+      - all_of:
+          - ["tradeoff", "trade-off", "trade off"]
+          - ["metrolog", "sensing", "quantum algorithm", "quantum estimation",
+             "parameter estimation", "phase estimation"]
+      - all_of:
+          - ["energy cost", "energetic cost", "energy resource", "energy-time",
+             "energy time", "time complexity", "query complexity", "resource cost",
+             "resource-time", "resource theory of"]
+          - ["metrolog", "sensing", "quantum algorithm", "quantum estimation",
+             "parameter estimation", "phase estimation"]
+
+  # ── 3. Non-Gaussianity / thermodynamics / batteries / refrigeration / etc ───
+  - name: "Non-Gaussianity / quantum thermodynamics / batteries / refrigeration / nonclassicality"
+    rules:
+      - all_of: [["non-gaussian", "nongaussian", "non gaussian", "non-gaussianity"]]
+      - all_of: [["quantum thermodynamic", "quantum thermodynamics"]]
+      - all_of: [["quantum batter"]]            # battery / batteries
+      - all_of: [["quantum refrigerat", "absorption refrigerator", "quantum fridge",
+                  "quantum heat engine", "quantum cooling"]]
+      - all_of: [["nonclassicality", "non-classicality", "non classicality",
+                  "nonclassical witness", "non-classicality witness",
+                  "nonclassicality witness", "nonclassical state"]]

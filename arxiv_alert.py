@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""
+Daily arXiv keyword alert.
+
+Fetches the most recent submissions in a chosen arXiv category, keeps only the
+papers whose title or abstract matches the keyword rules in config.yaml, and
+emails them to you. Already-seen IDs are stored in seen.json so the same paper
+is never emailed twice.
+
+Credentials are read from environment variables (set them as GitHub secrets):
+    SMTP_USER  - the Gmail address you send FROM   (e.g. pngwenhan@gmail.com)
+    SMTP_PASS  - a Gmail *App Password* (NOT your normal password)
+    MAIL_TO    - recipient (optional; defaults to pngwenhan@gmail.com)
+    SMTP_HOST  - optional, default smtp.gmail.com
+    SMTP_PORT  - optional, default 587
+"""
+
+import os
+import sys
+import json
+import html
+import time
+import smtplib
+import datetime as dt
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+
+import requests
+import feedparser
+import yaml
+
+API_URL = "http://export.arxiv.org/api/query"
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "config.yaml"
+SEEN_PATH = ROOT / "seen.json"
+DEFAULT_TO = "pngwenhan@gmail.com"
+
+
+# ── config + state ──────────────────────────────────────────────────────────
+def load_config():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_seen():
+    if SEEN_PATH.exists():
+        try:
+            return set(json.loads(SEEN_PATH.read_text()))
+        except json.JSONDecodeError:
+            return set()
+    return set()
+
+
+def save_seen(seen):
+    # keep only the most recent 8000 ids so the file can't grow without bound
+    SEEN_PATH.write_text(json.dumps(sorted(seen)[-8000:], indent=0))
+
+
+# ── arXiv fetching ──────────────────────────────────────────────────────────
+def fetch_recent(category, want=400, retries=4):
+    params = {
+        "search_query": f"cat:{category}",
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+        "start": 0,
+        "max_results": want,
+    }
+    last_err = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(API_URL, params=params, timeout=60,
+                             headers={"User-Agent": "arxiv-daily-alert/1.0"})
+            r.raise_for_status()
+            feed = feedparser.parse(r.text)
+            if feed.entries:
+                return feed
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+        time.sleep(5 * (attempt + 1))  # arXiv asks callers to back off politely
+    if last_err:
+        raise last_err
+    return feedparser.parse("")  # empty feed
+
+
+# ── keyword matching ────────────────────────────────────────────────────────
+def topic_matches(topic, hay):
+    """hay is the lowercased 'title + abstract' string."""
+    for rule in topic.get("rules", []):
+        groups = rule.get("all_of", [])
+        if groups and all(any(term.lower() in hay for term in group) for group in groups):
+            return True
+    return False
+
+
+def matched_topics(cfg, title, summary):
+    hay = (title + " " + summary).lower()
+    return [t["name"] for t in cfg["topics"] if topic_matches(t, hay)]
+
+
+def entry_id(entry):
+    # http://arxiv.org/abs/2401.01234v2  ->  2401.01234
+    raw = entry.id.split("/abs/")[-1]
+    return raw.split("v")[0]
+
+
+def get_authors(entry):
+    if hasattr(entry, "authors") and entry.authors:
+        return [a.get("name", "") for a in entry.authors if a.get("name")]
+    if hasattr(entry, "author") and entry.author:
+        return [entry.author]
+    return []
+
+
+# ── email ───────────────────────────────────────────────────────────────────
+def build_email_html(cfg, papers):
+    cat = cfg.get("category", "quant-ph")
+    today = dt.datetime.now().strftime("%A, %d %B %Y")
+    parts = ['<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,'
+             'sans-serif;max-width:680px;margin:0 auto;color:#111;">']
+    parts.append(f'<div style="font-size:18px;font-weight:700;margin:0 0 2px;">'
+                 f'arXiv {html.escape(cat)} — daily digest</div>')
+    parts.append(f'<div style="font-size:12px;color:#666;margin:0 0 18px;">'
+                 f'{today} · {len(papers)} matching paper(s)</div>')
+    for p in papers:
+        authors = ", ".join(p["authors"][:8]) + (" et al." if len(p["authors"]) > 8 else "")
+        tags = " · ".join(html.escape(t) for t in p["topics"])
+        parts.append(
+            '<div style="margin:0 0 20px;padding:0 0 16px;border-bottom:1px solid #eaeaea;">'
+            f'<div style="font-size:15px;font-weight:600;line-height:1.35;">'
+            f'<a href="{p["abs"]}" style="color:#0b5cad;text-decoration:none;">'
+            f'{html.escape(p["title"])}</a></div>'
+            f'<div style="font-size:12px;color:#555;margin:4px 0;">{html.escape(authors)}</div>'
+            f'<div style="font-size:11px;color:#9a3412;margin:4px 0;">matched: {tags}</div>'
+            f'<div style="font-size:13px;color:#222;line-height:1.45;margin:6px 0;">'
+            f'{html.escape(p["summary"])}</div>'
+            f'<div style="font-size:12px;"><a href="{p["abs"]}" style="color:#0b5cad;">abstract</a>'
+            f' &nbsp;|&nbsp; <a href="{p["pdf"]}" style="color:#0b5cad;">pdf</a>'
+            f' &nbsp;·&nbsp; <span style="color:#777;">submitted {p["published"]}</span></div>'
+            '</div>'
+        )
+    parts.append('<div style="font-size:11px;color:#999;margin-top:8px;">'
+                 'Generated by your GitHub Actions arXiv alert · edit config.yaml '
+                 'to change keywords.</div></div>')
+    return "".join(parts)
+
+
+def build_email_text(papers):
+    lines = []
+    for p in papers:
+        lines.append(p["title"])
+        lines.append(p["abs"])
+        lines.append("matched: " + ", ".join(p["topics"]))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def send_email(cfg, papers, user, password, host, port, mail_to):
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    cat = cfg.get("category", "quant-ph")
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[arXiv {cat}] {len(papers)} new paper(s) — {today}"
+    msg["From"] = user
+    msg["To"] = mail_to
+    msg.attach(MIMEText(build_email_text(papers), "plain", "utf-8"))
+    msg.attach(MIMEText(build_email_html(cfg, papers), "html", "utf-8"))
+    with smtplib.SMTP(host, port, timeout=60) as s:
+        s.starttls()
+        s.login(user, password)
+        s.sendmail(user, [mail_to], msg.as_string())
+
+
+# ── main ────────────────────────────────────────────────────────────────────
+def main():
+    cfg = load_config()
+
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_pass = os.environ.get("SMTP_PASS")
+    mail_to = os.environ.get("MAIL_TO", DEFAULT_TO)
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+
+    if not smtp_user or not smtp_pass:
+        sys.exit("ERROR: set the SMTP_USER and SMTP_PASS environment variables "
+                 "(GitHub repo secrets).")
+
+    lookback = int(cfg.get("lookback_days", 2))
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=lookback)
+
+    feed = fetch_recent(cfg.get("category", "quant-ph"))
+    seen = load_seen()
+
+    papers = []
+    for e in feed.entries:
+        pid = entry_id(e)
+        if pid in seen:
+            continue
+        if getattr(e, "published_parsed", None):
+            pub = dt.datetime(*e.published_parsed[:6], tzinfo=dt.timezone.utc)
+            if pub < cutoff:
+                continue
+            pub_str = pub.strftime("%Y-%m-%d")
+        else:
+            pub_str = "?"
+        topics = matched_topics(cfg, e.title, e.summary)
+        if not topics:
+            continue
+        papers.append({
+            "id": pid,
+            "title": " ".join(e.title.split()),
+            "summary": " ".join(e.summary.split()),
+            "authors": get_authors(e),
+            "abs": f"https://arxiv.org/abs/{pid}",
+            "pdf": f"https://arxiv.org/pdf/{pid}",
+            "published": pub_str,
+            "topics": topics,
+        })
+
+    if not papers:
+        print("No new matching papers today — nothing emailed.")
+        return
+
+    papers = papers[: int(cfg.get("max_email", 80))]
+    send_email(cfg, papers, smtp_user, smtp_pass, smtp_host, smtp_port, mail_to)
+
+    seen.update(p["id"] for p in papers)
+    save_seen(seen)
+    print(f"Emailed {len(papers)} paper(s) to {mail_to}.")
+
+
+if __name__ == "__main__":
+    main()
