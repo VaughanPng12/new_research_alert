@@ -17,6 +17,7 @@ Credentials are read from environment variables (set them as GitHub secrets):
 
 import os
 import sys
+import re
 import json
 import html
 import time
@@ -95,7 +96,58 @@ def topic_matches(topic, hay):
 
 def matched_topics(cfg, title, summary):
     hay = (title + " " + summary).lower()
-    return [t["name"] for t in cfg["topics"] if topic_matches(t, hay)]
+    return [t["name"] for t in cfg.get("topics", []) if topic_matches(t, hay)]
+
+
+def _name_tokens(name):
+    return [t for t in re.split(r"[^a-z0-9]+", name.lower()) if t]
+
+
+def _token_match(wt, at):
+    # exact token, or an initial matching the other's first letter (either way),
+    # so "martin" matches "m." and "huei" matches "h." — handles arXiv initials.
+    if wt == at:
+        return True
+    if len(at) == 1 and at == wt[0]:
+        return True
+    if len(wt) == 1 and wt == at[0]:
+        return True
+    return False
+
+
+def matched_authors(cfg, authors):
+    """Return watched-author entries that appear among this paper's authors.
+
+    Matching is order-independent and initial-aware: every token of a watchlist
+    entry must match some token of one author's name. So "Nelly Ng Huei Ying"
+    matches "Nelly Huei Ying Ng", and "Martin Plenio" matches "M. B. Plenio".
+    Use a fuller name to disambiguate common surnames.
+    """
+    watch = cfg.get("authors") or []
+    if not watch:
+        return []
+    author_tokens = [_name_tokens(a) for a in authors]
+    hits = []
+    for w in watch:
+        wts = _name_tokens(str(w))
+        if not wts:
+            continue
+        for ats in author_tokens:
+            if not all(any(_token_match(wt, at) for at in ats) for wt in wts):
+                continue
+            # Guard against all-initials coincidences (e.g. two "Y." initials
+            # matching "Yuxiang" and "Yang"): require at least one substantial
+            # name part (>= 3 chars) to match a full author token, not just an
+            # initial. If the entry is entirely short tokens, require all exact.
+            substantial = [wt for wt in wts if len(wt) >= 3]
+            if substantial:
+                if any(wt in ats for wt in substantial):
+                    hits.append(w)
+                    break
+            elif all(wt in ats for wt in wts):
+                hits.append(w)
+                break
+    return hits
 
 
 def entry_id(entry):
@@ -202,18 +254,21 @@ def main():
             pub_str = pub.strftime("%Y-%m-%d")
         else:
             pub_str = "?"
+        author_list = get_authors(e)
         topics = matched_topics(cfg, e.title, e.summary)
-        if not topics:
+        author_hits = matched_authors(cfg, author_list)
+        if not topics and not author_hits:
             continue
+        labels = list(topics) + [f"author: {a}" for a in author_hits]
         papers.append({
             "id": pid,
             "title": " ".join(e.title.split()),
             "summary": " ".join(e.summary.split()),
-            "authors": get_authors(e),
+            "authors": author_list,
             "abs": f"https://arxiv.org/abs/{pid}",
             "pdf": f"https://arxiv.org/pdf/{pid}",
             "published": pub_str,
-            "topics": topics,
+            "topics": labels,
         })
 
     if not papers:
