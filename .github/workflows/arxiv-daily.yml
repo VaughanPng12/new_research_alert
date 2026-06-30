@@ -1,0 +1,49 @@
+name: arXiv daily alert
+
+on:
+  schedule:
+    # 23:00 UTC every day  ==  07:00 Singapore time (UTC+8) the next morning.
+    # arXiv announces new papers on weekday mornings (UTC); running daily with
+    # the seen.json dedup means nothing is ever missed or sent twice, so the
+    # exact time isn't critical. Change the line below to re-time your digest.
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}     # also lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write           # needed so the job can commit the updated seen.json
+
+concurrency:
+  group: arxiv-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run alert
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ secrets.MAIL_TO }}
+        run: python arxiv_alert.py
+
+      - name: Commit updated state
+        run: |
+          if [[ -n "$(git status --porcelain seen.json)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add seen.json
+            git commit -m "Update seen.json [skip ci]"
+            git push
+          else
+            echo "No state change to commit."
+          fi
