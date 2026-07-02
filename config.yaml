@@ -59,3 +59,29 @@ topics:
       - all_of: [["nonclassicality", "non-classicality", "non classicality",
                   "nonclassical witness", "non-classicality witness",
                   "nonclassicality witness", "nonclassical state"]]
+
+# ── Author watchlist ────────────────────────────────────────────────────────
+# Any paper by someone here is included regardless of keywords (labelled
+# 'author: ...' in the email). Matching is order-independent and initial-aware,
+# so word order and initials (e.g. 'M. B. Plenio') are handled. Only papers in
+# the category above (quant-ph) are scanned.
+authors:
+  - "Nelly Ng"
+  - "Liang Jiang"
+  - "Federico Centrone"
+  - "Valerio Scarani"
+  - "Clive Aw"
+  - "Prabha Mandayam"
+  - "Francesco Buscemi"
+  - "Paolo Abiuso"
+  - "Qiushi Liu"
+  - "Yuxiang Yang"
+  - "Martin Plenio"
+  - "John Goold"
+  - "Shane Dooley"
+  - "Felix Binder"
+  - "Nicole Yunger Halpern"
+  - "Patryk Lipka-Bartosik"
+  - "Matteo G A Paris"
+  - "Xueyuan Hu"
+  - "Ge Bai"
