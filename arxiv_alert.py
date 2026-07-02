@@ -21,6 +21,7 @@ import re
 import json
 import html
 import time
+import random
 import smtplib
 import datetime as dt
 from email.mime.multipart import MIMEMultipart
@@ -31,7 +32,9 @@ import requests
 import feedparser
 import yaml
 
-API_URL = "http://export.arxiv.org/api/query"
+API_URL = "https://export.arxiv.org/api/query"
+RSS_URL = "https://rss.arxiv.org/rss/{cat}"
+UA = {"User-Agent": "new-research-alert/1.0 (GitHub Actions; arXiv daily digest)"}
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.yaml"
 SEEN_PATH = ROOT / "seen.json"
@@ -59,7 +62,43 @@ def save_seen(seen):
 
 
 # ── arXiv fetching ──────────────────────────────────────────────────────────
-def fetch_recent(category, want=400, retries=4):
+def _get(url, params=None, retries=6):
+    """GET with polite backoff. Honors Retry-After and backs off on 429/5xx.
+
+    arXiv rate-limits shared IPs (like GitHub's runners), so a 429 is common and
+    usually transient. We wait it out with exponential backoff plus jitter.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=60, headers=UA)
+            if r.status_code in (429, 500, 502, 503):
+                ra = r.headers.get("Retry-After", "")
+                wait = int(ra) if ra.isdigit() else min(90, 15 * (attempt + 1))
+                print(f"  arXiv returned {r.status_code}; waiting {wait}s "
+                      f"(attempt {attempt + 1}/{retries})")
+                time.sleep(wait + random.uniform(0, 4))
+                continue
+            r.raise_for_status()
+            return r.text
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            time.sleep(min(90, 10 * (attempt + 1)) + random.uniform(0, 4))
+    if last_err:
+        raise last_err
+    raise RuntimeError("exhausted retries")
+
+
+def fetch_recent(category, want=300):
+    """Return (feed, source). Tries the API first, then the RSS feed.
+
+    Returns (None, None) if both fail — the caller treats that as a transient
+    outage and exits cleanly so the next scheduled run just picks up where this
+    left off (nothing is lost thanks to seen.json + the lookback window).
+    """
+    # small random desync so many GitHub jobs don't hit arXiv the same second
+    time.sleep(random.uniform(0, 8))
+
     params = {
         "search_query": f"cat:{category}",
         "sortBy": "submittedDate",
@@ -67,21 +106,23 @@ def fetch_recent(category, want=400, retries=4):
         "start": 0,
         "max_results": want,
     }
-    last_err = None
-    for attempt in range(retries):
-        try:
-            r = requests.get(API_URL, params=params, timeout=60,
-                             headers={"User-Agent": "arxiv-daily-alert/1.0"})
-            r.raise_for_status()
-            feed = feedparser.parse(r.text)
-            if feed.entries:
-                return feed
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-        time.sleep(5 * (attempt + 1))  # arXiv asks callers to back off politely
-    if last_err:
-        raise last_err
-    return feedparser.parse("")  # empty feed
+    try:
+        feed = feedparser.parse(_get(API_URL, params))
+        if feed.entries:
+            return feed, "api"
+        print("  API returned no entries; trying RSS fallback.")
+    except Exception as e:  # noqa: BLE001
+        print(f"  API fetch failed ({e}); trying RSS fallback.")
+
+    try:
+        feed = feedparser.parse(_get(RSS_URL.format(cat=category)))
+        if feed.entries:
+            return feed, "rss"
+        print("  RSS returned no entries.")
+    except Exception as e:  # noqa: BLE001
+        print(f"  RSS fetch failed ({e}).")
+
+    return None, None
 
 
 # ── keyword matching ────────────────────────────────────────────────────────
@@ -151,17 +192,44 @@ def matched_authors(cfg, authors):
 
 
 def entry_id(entry):
-    # http://arxiv.org/abs/2401.01234v2  ->  2401.01234
-    raw = entry.id.split("/abs/")[-1]
+    # Works for API (id like http://arxiv.org/abs/2401.01234v2) and RSS
+    # (id/guid like oai:arXiv.org:2401.01234v1, or the link URL).
+    for cand in (getattr(entry, "id", "") or "", getattr(entry, "link", "") or ""):
+        m = re.search(r"(\d{4}\.\d{4,5})", cand)
+        if m:
+            return m.group(1)
+    raw = (getattr(entry, "id", "") or "").split("/abs/")[-1]
     return raw.split("v")[0]
 
 
 def get_authors(entry):
-    if hasattr(entry, "authors") and entry.authors:
-        return [a.get("name", "") for a in entry.authors if a.get("name")]
-    if hasattr(entry, "author") and entry.author:
-        return [entry.author]
+    # API: entry.authors is a list of {'name': ...}. RSS: dc:creator lands in
+    # entry.author (and/or entry.authors) as names separated by commas/semicolons.
+    if getattr(entry, "authors", None):
+        names = [a.get("name", "").strip() for a in entry.authors
+                 if isinstance(a, dict) and a.get("name")]
+        if len(names) > 1:
+            return names
+        if len(names) == 1:
+            return [n for n in re.split(r"\s*[;,]\s*", names[0]) if n]
+    if getattr(entry, "author", None):
+        return [n for n in re.split(r"\s*[;,]\s*", entry.author) if n]
     return []
+
+
+def get_title(entry):
+    t = getattr(entry, "title", "") or ""
+    # RSS titles may end with " (arXiv:2401.01234v1 [quant-ph])"
+    t = re.sub(r"\s*\(arXiv:.*?\)\s*$", "", t)
+    return " ".join(t.split())
+
+
+def get_summary(entry):
+    s = getattr(entry, "summary", "") or ""
+    # RSS descriptions prepend "arXiv:... Announce Type: ... Abstract: <text>"
+    if "Abstract:" in s:
+        s = s.split("Abstract:", 1)[1]
+    return " ".join(s.split())
 
 
 # ── email ───────────────────────────────────────────────────────────────────
@@ -239,7 +307,13 @@ def main():
     lookback = int(cfg.get("lookback_days", 2))
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=lookback)
 
-    feed = fetch_recent(cfg.get("category", "quant-ph"))
+    feed, source = fetch_recent(cfg.get("category", "quant-ph"))
+    if feed is None:
+        # transient outage / rate limit — exit cleanly; next run catches up
+        print("Could not reach arXiv this run (likely a temporary rate limit). "
+              "Nothing lost — the next scheduled run will pick these up.")
+        return
+    print(f"Fetched {len(feed.entries)} entries via {source}.")
     seen = load_seen()
 
     papers = []
@@ -254,16 +328,18 @@ def main():
             pub_str = pub.strftime("%Y-%m-%d")
         else:
             pub_str = "?"
+        title = get_title(e)
+        summary = get_summary(e)
         author_list = get_authors(e)
-        topics = matched_topics(cfg, e.title, e.summary)
+        topics = matched_topics(cfg, title, summary)
         author_hits = matched_authors(cfg, author_list)
         if not topics and not author_hits:
             continue
         labels = list(topics) + [f"author: {a}" for a in author_hits]
         papers.append({
             "id": pid,
-            "title": " ".join(e.title.split()),
-            "summary": " ".join(e.summary.split()),
+            "title": title,
+            "summary": summary,
             "authors": author_list,
             "abs": f"https://arxiv.org/abs/{pid}",
             "pdf": f"https://arxiv.org/pdf/{pid}",

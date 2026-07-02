@@ -38,9 +38,9 @@ Add these:
 
 | Name        | Value                                            |
 |-------------|--------------------------------------------------|
-| `SMTP_USER` | the Gmail you send **from** (e.g. `xxx@gmail.com`) |
+| `SMTP_USER` | the Gmail you send **from** (e.g. `pngwenhan@gmail.com`) |
 | `SMTP_PASS` | the 16-character **App Password** from step 2    |
-| `MAIL_TO`   | where to deliver the digest (`xxx@gmail.com`) |
+| `MAIL_TO`   | where to deliver the digest (`pngwenhan@gmail.com`) |
 
 (`SMTP_USER` and `MAIL_TO` can be the same address — the account just emails itself.)
 
@@ -74,9 +74,9 @@ That's it. From then on it runs automatically every day.
 ## Run it locally (optional)
 ```bash
 pip install -r requirements.txt
-export SMTP_USER="xxx@gmail.com"
+export SMTP_USER="pngwenhan@gmail.com"
 export SMTP_PASS="your-app-password"
-export MAIL_TO="xxx@gmail.com"
+export MAIL_TO="pngwenhan@gmail.com"
 python arxiv_alert.py
 ```
 
